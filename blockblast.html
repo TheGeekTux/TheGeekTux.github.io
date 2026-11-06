@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TheGeekTux - Block Blast Clone</title>
+    <link rel="icon" type="image/jpeg" href="thegeektux.jpg">
+    <style>
+        body { margin: 0; background: #121214; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; touch-action: none; overflow: hidden; user-select: none; -webkit-user-select: none; }
+        #ui { text-align: center; margin-bottom: 10px; width: 100%; max-width: 440px; }
+        h1 { margin: 0; font-size: 24px; color: #fc0; }
+        #score-board { font-size: 16px; margin-top: 5px; background: rgba(255,255,255,0.1); padding: 5px 15px; border-radius: 20px; display: inline-flex; gap: 15px; }
+        .wrapper { position: relative; width: 100%; max-width: 440px; aspect-ratio: 440/650; }
+        canvas { background: #1e1e24; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); cursor: grab; width: 100%; height: 100%; display: block; }
+        .overlay { display: flex; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); flex-direction: column; align-items: center; justify-content: center; border-radius: 10px; z-index: 10; text-align: center; }
+        button { background: #fc0; border: none; padding: 12px 25px; font-size: 16px; font-weight: bold; border-radius: 5px; cursor: pointer; margin: 8px; -webkit-tap-highlight-color: transparent; }
+        .btn-ext { background: #ff3366; color: #fff; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1 id="game-title">BLOCK BLAST</h1>
+        <div id="score-board"><div>Score: <span id="score">0</span></div><div>Best: <span id="best">0</span></div></div>
+    </div>
+    <div class="wrapper">
+        <div id="menu-screen" class="overlay">
+            <h2>Select Mode</h2>
+            <button onclick="startGame('classic')">Classic Mode</button>
+            <button class="btn-ext" onclick="startGame('extreme')">Extreme Mode</button>
+        </div>
+        <div id="go" class="overlay" style="display: none;"><h2>Game Over!</h2><button onclick="backToMenu()">Main Menu</button></div>
+        <canvas id="c" width="440" height="650"></canvas>
+    </div>
+    <script>
+        const canvas = document.getElementById('c'), ctx = canvas.getContext('2d'), scoreEl = document.getElementById('score'), bestEl = document.getElementById('best'), goScreen = document.getElementById('go'), menuScreen = document.getElementById('menu-screen'), titleEl = document.getElementById('game-title');
+        const COLORS = ['#2a2a35', '#ff3366', '#33ccff', '#33ff66', '#ffcc00', '#b833ff', '#ff6633'];
+        
+        // Matrices de bloques corregidas (2D reales)
+        const SHAPES_CLASSIC = [
+            [[1]], 
+            [[1,1]], 
+            [[1],[1]], 
+            [[1,1,1]], 
+            [[1],[1],[1]], 
+            [[1,1],[1,1]], 
+            [[1,1,1],[0,1,0]], 
+            [[1,0],[1,1]], 
+            [[1,1,1],[1,0,0],[1,0,0]], 
+            [[1,1,0],[0,1,1]]
+        ];
+        const SHAPES_EXTREME = [
+            ...SHAPES_CLASSIC, 
+            [[1,1,1,1]], 
+            [[1],[1],[1],[1]], 
+            [[1,1,1,1,1]], 
+            [[1],[1],[1],[1],[1]], 
+            [[1,1,1],[1,1,1],[1,1,1]], 
+            [[1,1,1],[0,1,0],[0,1,0]], 
+            [[1,0,0],[1,1,1],[0,0,1]]
+        ];
+
+        let grid = [], score = 0, best = 0, pieces = [], dragged = null, ox = 0, oy = 0, audioCtx = null, currentMode = 'classic';
+
+        function playSound(type) {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                let osc = audioCtx.createOscillator(), gain = audioCtx.createGain(), now = audioCtx.currentTime;
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                let f = type === 'place' ? 300 : type === 'clear' ? 400 : 200;
+                let t = type === 'place' ? 0.1 : type === 'clear' ? 0.2 : 0.5;
+                osc.frequency.setValueAtTime(f, now); osc.frequency.exponentialRampToValueAtTime(type==='clear'?800:type==='gameover'?80:150, now + t);
+                gain.gain.setValueAtTime(type==='gameover'?0.5:0.3, now); gain.gain.linearRampToValueAtTime(0, now + t);
+                osc.start(now); osc.stop(now + t);
+            } catch(e) {}
+        }
+
+        class Piece {
+            constructor(shape, color, slot) {
+                this.shape = shape; this.color = color; this.slot = slot; this.placed = false;
+                this.h = shape.length; this.w = shape[0].length; this.reset();
+            }
+            reset() { this.sc = 0.5; this.x = (146 * this.slot) + (146 - this.w * 25) / 2; this.y = 515 + (100 - this.h * 25) / 2; }
+            draw() {
+                if (this.placed) return;
+                let size = 50 * this.sc;
+                for (let r = 0; r < this.h; r++)
+                    for (let c = 0; c < this.w; c++)
+                        if (this.shape[r][c]) {
+                            ctx.fillStyle = COLORS[this.color]; ctx.beginPath(); ctx.roundRect(this.x + c * size + 1, this.y + r * size + 1, size - 2, size - 2, 4); ctx.fill();
+                        }
+            }
+            contains(mx, my) { return mx >= this.x && mx <= this.x + this.w * 50 * this.sc && my >= this.y && my <= this.y + this.h * 50 * this.sc; }
+        }
+
+        function startGame(mode) {
+            currentMode = mode; titleEl.textContent = mode === 'extreme' ? 'BLOCK BLAST HARD' : 'BLOCK BLAST';
+            menuScreen.style.display = 'none'; goScreen.style.display = 'none';
+            best = localStorage.getItem('bb_best_' + mode) || 0; bestEl.textContent = best; reset(); playSound('place');
+        }
+        function backToMenu() { goScreen.style.display = 'none'; menuScreen.style.display = 'flex'; }
+        function reset() { grid = Array(8).fill().map(() => Array(8).fill(0)); score = 0; scoreEl.textContent = 0; pGen(); }
+        function pGen() { 
+            let pool = currentMode === 'extreme' ? SHAPES_EXTREME : SHAPES_CLASSIC;
+            pieces = Array(3).fill().map((_, i) => new Piece(pool[Math.floor(Math.random() * pool.length)], Math.floor(Math.random() * 6) + 1, i)); checkGO(); 
+        }
+        function check(p, sr, sc) {
+            if (sr < 0 || sc < 0 || sr + p.h > 8 || sc + p.w > 8) return false;
+            return p.shape.every((row, r) => row.every((val, c) => !val || !grid[sr + r][sc + c]));
+        }
+        function checkGO() {
+            if (!pieces.some(p => p.placed || grid.some((_, r) => grid.some((__, c) => check(p, r, c))))) { goScreen.style.display = 'flex'; playSound('gameover'); }
+        }
+        function getPos(e) {
+            let r = canvas.getBoundingClientRect(), clX = e.touches ? e.touches[clientX] || e.touches[0].clientX : e.clientX, clY = e.touches ? e.touches[clientY] || e.touches[0].clientY : e.clientY;
+            return { x: (clX - r.left) * (440 / r.width), y: (clY - r.top) * (650 / r.height) };
+        }
+        function start(e) {
+            let p = getPos(e); dragged = pieces.find(i => !i.placed && i.contains(p.x, p.y));
+            if (dragged) { dragged.sc = 1.0; ox = p.x - dragged.x; oy = p.y - dragged.y; }
+        }
+        function move(e) { if (!dragged) return; if(e.cancelable) e.preventDefault(); let p = getPos(e); dragged.x = p.x - ox; dragged.y = p.y - oy; }
+        function end() {
+            if (!dragged) return;
+            let tc = Math.round((dragged.x - 20) / 50), tr = Math.round((dragged.y - 30) / 50);
+            if (check(dragged, tr, tc)) {
+                dragged.shape.forEach((row, r) => row.forEach((v, c) => v && (grid[tr + r][tc + c] = dragged.color)));
+                dragged.placed = true; score += 10; playSound('place');
+                let rf = grid.map((row, r) => row.every(v => v) ? r : -1).filter(r => r >= 0), cf = Array(8).fill().map((_, c) => grid.every(row => row[c]) ? c : -1).filter(c => c >= 0);
+                rf.forEach(r => grid[r].fill(0)); cf.forEach(c => grid.forEach(row => row[c] = 0));
+                if (rf.length || cf.length) { score += (rf.length + cf.length) * 100; playSound('clear'); }
+                if (score > best) { best = score; localStorage.setItem('bb_best_' + currentMode, best); bestEl.textContent = best; }
+                scoreEl.textContent = score;
+                if (pieces.every(p => p.placed)) pGen(); else checkGO();
+            } else dragged.reset();
+            dragged = null;
+        }
+
+        canvas.addEventListener('mousedown', start); window.addEventListener('mousemove', move); window.addEventListener('mouseup', end);
+        canvas.addEventListener('touchstart', start, {passive:false}); window.addEventListener('touchmove', move, {passive:false}); window.addEventListener('touchend', end);
+
+        setInterval(() => {
+            ctx.clearRect(0, 0, 440, 650);
+            grid.forEach((row, r) => row.forEach((v, c) => {
+                ctx.fillStyle = COLORS[v]; ctx.beginPath(); ctx.roundRect(20 + c * 50 + 1, 30 + r * 50 + 1, 48, 48, 6); ctx.fill();
+            }));
+            ctx.fillStyle = '#17171d'; ctx.beginPath(); ctx.roundRect(15, 470, 410, 150, 10); ctx.fill();
+            pieces.forEach(p => p !== dragged && p.draw()); if (dragged) dragged.draw();
+        }, 1000 / 60);
+    </script>
+</body>
+</html>
